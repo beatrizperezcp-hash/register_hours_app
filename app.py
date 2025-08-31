@@ -2,33 +2,73 @@
 # -----------------------------------------------
 # ⏱️ Registro de horas Rorfeny trabajo (Streamlit)
 # -----------------------------------------------
-# Requiere: streamlit, sqlmodel, reportlab
+# Requiere: streamlit, sqlmodel, reportlab, psycopg2-binary (si usas Postgres)
 # Archiva automáticamente el 5 de cada mes (gracia hasta el día 4 para editar mes anterior).
 
 import os
 import io
 from pathlib import Path
 from datetime import date, time, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 from sqlmodel import Session, select
+from sqlalchemy import text
 
 from domain import WorkShift
 from repository import WorkShiftRepository, WorkShiftDB
 
 # =========================
-# Persistencia por entorno
+# Zona horaria (Madrid)
 # =========================
-DATA_DIR = Path(os.getenv("DATA_DIR", "/data" if Path("/data").exists() else "."))
+TZ = ZoneInfo("Europe/Madrid")
+
+def hoy_local() -> date:
+    return datetime.now(TZ).date()
+
+# =========================
+# Persistencia por entorno (con fallback seguro)
+# =========================
+def _pick_data_dir() -> Path:
+    """
+    Elige carpeta escribible para DB/PDFs:
+    1) Si DATA_DIR está definido y es escribible, se usa.
+    2) Si /data es escribible (disco montado), se usa.
+    3) Si no, ./data en el working dir.
+    """
+    candidates = []
+    env = os.getenv("DATA_DIR")
+    if env:
+        candidates.append(Path(env))
+    candidates += [Path("/data"), Path.cwd() / "data"]
+
+    for p in candidates:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            t = p / ".rwtest"
+            t.write_text("ok")
+            t.unlink(missing_ok=True)
+            return p
+        except Exception:
+            continue
+    return Path.cwd()  # último recurso
+
+DATA_DIR = _pick_data_dir()
+
+# Usa Postgres si hay DATABASE_URL; si no, SQLite en DATA_DIR
 DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{(DATA_DIR / 'workhours.db').as_posix()}")
 
 # Repo (usa Postgres si DATABASE_URL existe; si no, SQLite local)
 repo = WorkShiftRepository(DB_URL, echo=False)
 
-# PDFs (en Free de Render el disco no es persistente; se regeneran cuando haga falta)
+# Carpeta de PDFs (si falla, cae a ./reportes_mensuales)
 CARPETA_REPORTES = DATA_DIR / "reportes_mensuales"
-CARPETA_REPORTES.mkdir(parents=True, exist_ok=True)
+try:
+    CARPETA_REPORTES.mkdir(parents=True, exist_ok=True)
+except Exception:
+    CARPETA_REPORTES = Path.cwd() / "reportes_mensuales"
+    CARPETA_REPORTES.mkdir(parents=True, exist_ok=True)
 
 # =========================
 # Parámetros globales
@@ -119,11 +159,12 @@ def rango_mes(yyyy_mm: str) -> tuple[date, date]:
     return d1, d2
 
 # =========================
-# Cálculo de horas
+# Cálculo de horas (con fecha base en TZ Madrid)
 # =========================
-def calcular_horas_trabajadas(start: time, end: time, break_min: int) -> float:
-    t0 = datetime.combine(date.today(), start)
-    t1 = datetime.combine(date.today(), end)
+def calcular_horas_trabajadas(start: time, end: time, break_min: int, base_date: date | None = None) -> float:
+    d = base_date or hoy_local()
+    t0 = datetime.combine(d, start)
+    t1 = datetime.combine(d, end)
     if t1 < t0:
         t1 += timedelta(days=1)
     total = (t1 - t0).total_seconds() / 3600.0
@@ -161,6 +202,18 @@ st.markdown("""
 
 st.markdown(f'<div class="app-header">⏱️ {TITULO_APP}</div>', unsafe_allow_html=True)
 st.caption("Mes actual: añade/edita tus horas. Meses anteriores: descárgalos en PDF. L–V por defecto; fines de semana manual.")
+
+# === Indicador de conexión a BD (barra lateral) ===
+try:
+    with Session(repo.engine) as s:
+        s.exec(text("SELECT 1"))
+    backend = repo.engine.url.get_backend_name()  # 'postgresql' o 'sqlite'
+    st.sidebar.success(f"BD OK · {('Postgres (Supabase)' if backend.startswith('postgres') else 'SQLite (local)')}")
+    st.sidebar.caption(repo.engine.url.render_as_string(hide_password=True))
+except Exception as e:
+    st.sidebar.error("❌ Error de conexión a la BD")
+    st.sidebar.caption("Revisa DATABASE_URL / 'psycopg2-binary' / pooler IPv4.")
+    st.sidebar.exception(e)
 
 # =========================
 # Helpers de estado (sin conflictos)
@@ -322,7 +375,7 @@ def generar_pdf_mes(yyyy_mm: str) -> bytes:
 # =========================
 # Avisos y archivado automático
 # =========================
-hoy = date.today()
+hoy = hoy_local()
 mes_actual = clave_mes(hoy)
 prev_day = (date(hoy.year, hoy.month, 1) - timedelta(days=1))
 mes_anterior = clave_mes(prev_day)
@@ -343,8 +396,14 @@ def auto_archivar_mes_anterior():
             return
         destino = CARPETA_REPORTES / f"reporte_{mes_anterior}.pdf"
         pdf_bytes = generar_pdf_mes(mes_anterior)
-        with open(destino, "wb") as fh:
-            fh.write(pdf_bytes)
+        try:
+            with open(destino, "wb") as fh:
+                fh.write(pdf_bytes)
+        except Exception:
+            st.warning(
+                "No se pudo guardar el PDF en disco (sin permisos). "
+                "Puedes descargarlo desde “PDF del mes mostrado”."
+            )
 
 auto_archivar_mes_anterior()
 
@@ -378,7 +437,7 @@ else:
         elif existe_registro(hoy):
             st.warning("Ese día ya está registrado.")
         else:
-            hw = calcular_horas_trabajadas(inicio_nuevo, fin_nuevo, descanso_nv)
+            hw = calcular_horas_trabajadas(inicio_nuevo, fin_nuevo, descanso_nv, base_date=hoy)
             delta = delta_diario_horas(hw)
             repo.add(WorkShift(
                 work_date=hoy,
@@ -468,7 +527,8 @@ else:
                         fila = s.get(WorkShiftDB, fila_id)
                         if not fila:
                             continue
-                        hw = calcular_horas_trabajadas(t_ini, t_fin, fila.break_minutes)
+                        # Recalcula usando la fecha real de ese día
+                        hw = calcular_horas_trabajadas(t_ini, t_fin, fila.break_minutes, base_date=datetime.fromisoformat(fila.work_date.isoformat()).date())
                         delta = delta_diario_horas(hw)
                         fila.start_time = t_ini
                         fila.end_time = t_fin
@@ -495,7 +555,10 @@ if not df_hist.empty:
     extras_semana_min = defaultdict(int)
     extras_sobre30_min = defaultdict(int)
     for f in filas:
-        hw = f.hours_worked if f.hours_worked is not None else calcular_horas_trabajadas(f.start_time, f.end_time, f.break_minutes)
+        if f.hours_worked is None:
+            hw = calcular_horas_trabajadas(f.start_time, f.end_time, f.break_minutes, base_date=f.work_date)
+        else:
+            hw = float(f.hours_worked)
         yy, ww, _ = f.work_date.isocalendar()
         key = (yy, ww)
         tot_sem_h[key] += float(hw)
@@ -563,3 +626,4 @@ if archivados_filtrados:
             )
 else:
     st.caption("No hay PDFs archivados todavía.")
+
