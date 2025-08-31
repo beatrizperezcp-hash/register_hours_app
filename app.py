@@ -5,15 +5,30 @@
 # Requiere: streamlit, sqlmodel, reportlab
 # Archiva automáticamente el 5 de cada mes (gracia hasta el día 4 para editar mes anterior).
 
-import streamlit as st
-from datetime import date, time, datetime, timedelta
-import pandas as pd
+import os
 import io
 from pathlib import Path
+from datetime import date, time, datetime, timedelta
+
+import pandas as pd
+import streamlit as st
+from sqlmodel import Session, select
 
 from domain import WorkShift
 from repository import WorkShiftRepository, WorkShiftDB
-from sqlmodel import Session, select
+
+# =========================
+# Persistencia por entorno
+# =========================
+DATA_DIR = Path(os.getenv("DATA_DIR", "/data" if Path("/data").exists() else "."))
+DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{(DATA_DIR / 'workhours.db').as_posix()}")
+
+# Repo (usa Postgres si DATABASE_URL existe; si no, SQLite local)
+repo = WorkShiftRepository(DB_URL, echo=False)
+
+# PDFs (en Free de Render el disco no es persistente; se regeneran cuando haga falta)
+CARPETA_REPORTES = DATA_DIR / "reportes_mensuales"
+CARPETA_REPORTES.mkdir(parents=True, exist_ok=True)
 
 # =========================
 # Parámetros globales
@@ -23,7 +38,7 @@ UMBRAL_DIARIO_H = 6.0              # objetivo diario (descanso ya descontado)
 DESCANSO_DEFECTO_MIN = 30          # minutos descanso por defecto
 UMBRAL_SEMANAL_H = 30.0            # contrato: 30 h/semana
 GRACIA_DIAS = 4                    # puedes editar el mes anterior hasta el día 4
-AVISO_ULTIMOS_DIAS = 2             # mostrar aviso cuando queden <= 2 días de mes
+AVISO_ULTIMOS_DIAS = 2             # aviso cuando queden <= 2 días de mes
 
 # Salario (solo para PDF)
 HOURLY_GROSS_EUR = 13.30           # €/h brutos
@@ -75,7 +90,7 @@ def opciones_horas(step_min: int = 5, start: str = "06:00", end: str = "00:00") 
     opts = []
     for h in range(sh, 24):
         for m in range(0, 60, step_min):
-            if h == sh and m < sm:  # respeta start exacto
+            if h == sh and m < sm:
                 continue
             opts.append(f"{h:02d}:{m:02d}")
     if end == "00:00" and (not opts or opts[-1] != "00:00"):
@@ -119,13 +134,33 @@ def delta_diario_horas(hours_worked: float) -> float:
     return round(hours_worked - UMBRAL_DIARIO_H, 2)
 
 # =========================
-# Configuración de página y repositorio
+# Configuración de página + encabezado responsive
 # =========================
 st.set_page_config(page_title=TITULO_APP, page_icon="⏱️", layout="centered")
-st.title(f"⏱️ {TITULO_APP}")
-repo = WorkShiftRepository("sqlite:///workhours.db", echo=False)
-CARPETA_REPORTES = Path("reportes_mensuales")
-CARPETA_REPORTES.mkdir(parents=True, exist_ok=True)
+
+# CSS: título más pequeño y en UNA línea en móvil (≤ 480px)
+st.markdown("""
+<style>
+.app-header { 
+  font-weight: 600; 
+  font-size: 1.5rem; 
+  line-height: 1.2; 
+  margin: 0.2rem 0 0.6rem 0;
+}
+@media (max-width: 480px) {
+  .app-header {
+    font-size: 1.05rem !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    margin-bottom: 0.4rem !important;
+  }
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown(f'<div class="app-header">⏱️ {TITULO_APP}</div>', unsafe_allow_html=True)
+st.caption("Mes actual: añade/edita tus horas. Meses anteriores: descárgalos en PDF. L–V por defecto; fines de semana manual.")
 
 # =========================
 # Helpers de estado (sin conflictos)
@@ -296,8 +331,6 @@ dias_restantes = (last_day_curr - hoy).days
 
 # Avisos
 if dias_restantes <= AVISO_ULTIMOS_DIAS and dias_restantes >= 0:
-    proximo_archivo = date(last_day_curr.year, last_day_curr.month, last_day_curr.day) + timedelta(days=GRACIA_DIAS+1 - dias_restantes - 1)
-    # Se archivará el 5 del mes siguiente (con GRACIA_DIAS=4)
     st.info(f"Este mes se **archivará automáticamente el día {GRACIA_DIAS+1} del próximo mes**. Aún puedes editar hasta final de mes.", icon="ℹ️")
 if 1 <= hoy.day <= GRACIA_DIAS:
     st.warning(f"⏳ Puedes **editar el mes anterior** ({mes_en_letras_esp(mes_anterior)}) hasta el día {GRACIA_DIAS}.", icon="⏰")
@@ -309,7 +342,6 @@ def auto_archivar_mes_anterior():
         if df_prev.empty:
             return
         destino = CARPETA_REPORTES / f"reporte_{mes_anterior}.pdf"
-        # Generar/actualizar el PDF del mes anterior
         pdf_bytes = generar_pdf_mes(mes_anterior)
         with open(destino, "wb") as fh:
             fh.write(pdf_bytes)
@@ -321,8 +353,10 @@ auto_archivar_mes_anterior()
 # =========================
 st.subheader("➕ Añadir (hoy)")
 st.caption("Añade SOLO el día de hoy. Para días pasados usa la edición del histórico.")
-_flash_success_if_any()
-_init_add_form_defaults()
+def _init_add_form_defaults_wrapper():
+    _flash_success_if_any()
+    _init_add_form_defaults()
+_init_add_form_defaults_wrapper()
 
 if existe_registro(hoy):
     st.info("Hoy ya tiene un registro. Edita abajo, en **Histórico**.")
