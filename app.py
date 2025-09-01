@@ -59,12 +59,15 @@ DATA_DIR = _pick_data_dir()
 # Usa Postgres si hay DATABASE_URL; si no, SQLite en DATA_DIR
 DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{(DATA_DIR / 'workhours.db').as_posix()}")
 
-# ==== Repositorio cacheado (evita abrir muchas conexiones en free tier) ====
+# --- ⚡ NUEVO: romper caché y cachear repo con buster (para Render) ---
+st.cache_resource.clear()
+
 @st.cache_resource
-def get_repo(url: str):
+def get_repo(url: str, buster: str):
     return WorkShiftRepository(url, echo=False)
 
-repo = get_repo(DB_URL)
+print("DATABASE_URL =", DB_URL)  # verás esto en los logs de Render
+repo = get_repo(DB_URL, buster=DB_URL)
 
 # Carpeta de PDFs (si falla, cae a ./reportes_mensuales)
 CARPETA_REPORTES = DATA_DIR / "reportes_mensuales"
