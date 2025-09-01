@@ -4,7 +4,10 @@ from __future__ import annotations
 from typing import List
 from datetime import date, time
 
+from sqlalchemy.pool import NullPool
+from sqlalchemy import text
 from sqlmodel import SQLModel, Field, Session, create_engine, select
+
 from domain import WorkShift
 
 
@@ -22,13 +25,21 @@ class WorkShiftDB(SQLModel, table=True):
 
 def build_engine(db_url: str, echo: bool = False):
     """
-    Crea el engine para SQLite o Postgres.
+    Crea el engine para SQLite o Postgres (Supabase).
     - SQLite: check_same_thread=False para uso con Streamlit.
-    - Postgres/otros: pool_pre_ping para conexiones saludables.
+    - Postgres/Supabase: usamos NullPool (pooling lo hace PgBouncer) y pool_pre_ping.
+      Asegúrate de que la DB_URL incluya sslmode=require y, si usas Transaction Pooler,
+      desactivar prepared statements con statement_cache_size=0 (vía options en la URL).
     """
+    is_sqlite = db_url.startswith("sqlite")
     kwargs = {"echo": echo, "pool_pre_ping": True, "future": True}
-    if db_url.startswith("sqlite"):
+
+    if is_sqlite:
         kwargs["connect_args"] = {"check_same_thread": False}
+    else:
+        # Postgres (incluye Supabase): deja el pooling al pooler (PgBouncer)
+        kwargs["poolclass"] = NullPool
+
     return create_engine(db_url, **kwargs)
 
 
@@ -36,6 +47,13 @@ class WorkShiftRepository:
     """CRUD para turnos de trabajo. Compatible con SQLite y Postgres."""
     def __init__(self, url: str = "sqlite:///workhours.db", echo: bool = False):
         self.engine = build_engine(url, echo=echo)
+
+        # Smoke test de conexión si no es SQLite (falla rápido si hay problema de host/puerto/SSL)
+        if not url.startswith("sqlite"):
+            with self.engine.connect() as conn:
+                conn.execute(text("select 1"))
+
+        # Crea tablas si no existen
         SQLModel.metadata.create_all(self.engine)
 
     def add(self, s: WorkShift) -> None:
