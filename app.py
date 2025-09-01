@@ -463,7 +463,8 @@ else:
 st.subheader("🗓️ Histórico")
 puede_editar_anterior = (1 <= hoy.day <= GRACIA_DIAS)
 opciones_hist = ["Mes actual"]
-if puede_editar_anterior and (mes_anterior in listar_meses_con_registros()):
+# Mostrar siempre el mes anterior durante los días de gracia, aunque la BD actual no tenga datos
+if puede_editar_anterior:
     opciones_hist.append("Mes anterior (hasta día 4)")
 seleccion = st.radio("Mes a editar", opciones_hist, horizontal=True, label_visibility="collapsed")
 yyyy_mm_objetivo = mes_actual if seleccion == "Mes actual" else mes_anterior
