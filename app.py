@@ -186,7 +186,7 @@ def delta_diario_horas(hours_worked: float) -> float:
 # =========================
 st.set_page_config(page_title=TITULO_APP, page_icon="⏱️", layout="centered")
 
-# CSS: título más pequeño y en UNA línea en móvil (≤ 480px) + ligeros ajustes en tablas
+# CSS: título más pequeño y en UNA línea en móvil (≤ 480px)
 st.markdown("""
 <style>
 .app-header { 
@@ -203,29 +203,12 @@ st.markdown("""
     text-overflow: ellipsis !important;
     margin-bottom: 0.4rem !important;
   }
-  /* reducir un poco el tamaño en tablas para meter más info sin scroll */
-  .stDataFrame table, .stDataEditor table {
-    font-size: 0.9rem;
-  }
-  .stDataFrame [data-testid="stHorizontalBlock"] > div, 
-  .stDataEditor [data-testid="stHorizontalBlock"] > div {
-    padding-left: 0.2rem !important;
-    padding-right: 0.2rem !important;
-  }
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown(f'<div class="app-header">⏱️ {TITULO_APP}</div>', unsafe_allow_html=True)
 st.caption("Mes actual: añade/edita tus horas. Meses anteriores: descárgalos en PDF. L–V por defecto; fines de semana manual.")
-
-# === Spinner de conexión a BD (rápido) ===
-with st.spinner("Cargando conexión a la base de datos…"):
-    try:
-        with Session(repo.engine) as _s:
-            _s.exec(text("SELECT 1"))
-    except Exception:
-        pass  # La barra lateral mostrará el error abajo
 
 # === Indicador de conexión a BD (barra lateral) ===
 try:
@@ -475,218 +458,148 @@ else:
             st.rerun()
 
 # =========================
-# 🗓️ Histórico — sin scroll lateral en móvil (vista compacta)
+# 🗓️ Histórico — mes actual o mes anterior (hasta día 4)
 # =========================
 st.subheader("🗓️ Histórico")
-
-# Mostrar siempre “Mes anterior” durante los días de gracia
 puede_editar_anterior = (1 <= hoy.day <= GRACIA_DIAS)
 opciones_hist = ["Mes actual"]
+# Mostrar siempre el mes anterior durante los días de gracia, aunque la BD actual no tenga datos
 if puede_editar_anterior:
     opciones_hist.append("Mes anterior (hasta día 4)")
 seleccion = st.radio("Mes a editar", opciones_hist, horizontal=True, label_visibility="collapsed")
 yyyy_mm_objetivo = mes_actual if seleccion == "Mes actual" else mes_anterior
 permite_editar = (yyyy_mm_objetivo == mes_actual) or (yyyy_mm_objetivo == mes_anterior and puede_editar_anterior)
 
-st.caption(f"{mes_en_letras_esp(yyyy_mm_objetivo)} · Edita Inicio/Fin. Guardado automático.")
+st.caption(f"{mes_en_letras_esp(yyyy_mm_objetivo)} · Edita Inicio/Fin (HH:MM). Guardado automático.")
 
-# Vista móvil sin scroll lateral (por defecto ON)
-vista_compacta = st.toggle("Vista móvil sin scroll lateral", value=True, help="Muestra tarjetas verticales sin tabla ancha.")
-
-with st.spinner("Cargando histórico…"):
-    df_hist = cargar_hist_df_de_mes(yyyy_mm_objetivo)
-
+df_hist = cargar_hist_df_de_mes(yyyy_mm_objetivo)
 if df_hist.empty:
     st.info("Sin registros en este mes.")
 else:
-    if vista_compacta:
-        # ---- VISTA COMPACTA (sin tabla ancha) ----
-        def _clamp(hhmm: str) -> str:
-            if hhmm in TIME_OPTIONS:
-                return hhmm
-            try:
-                h, m = map(int, hhmm.split(":"))
-                if h < 6: return "06:00"
-                if h > 23 or (h == 23 and m > 55): return "00:00"
-                m = (m // 5) * 5
-                c = f"{h:02d}:{m:02d}"
-                return c if c in TIME_OPTIONS else "06:00"
-            except:
-                return "06:00"
+    # Asegurar que Inicio/Fin están dentro del rango permitido
+    def _clamp(hhmm: str) -> str:
+        if hhmm in TIME_OPTIONS:
+            return hhmm
+        try:
+            h, m = map(int, hhmm.split(":"))
+            if h < 6: return "06:00"
+            if h > 23 or (h == 23 and m > 55): return "00:00"
+            m = (m // 5) * 5
+            c = f"{h:02d}:{m:02d}"
+            return c if c in TIME_OPTIONS else "06:00"
+        except:
+            return "06:00"
+    df_hist["Inicio"] = df_hist["Inicio"].apply(_clamp)
+    df_hist["Fin"]    = df_hist["Fin"].apply(_clamp)
 
-        for idx, row in df_hist.iterrows():
-            fecha = row["Fecha"]
-            dia = row["Día"]
-            inicio = _clamp(row["Inicio"])
-            fin = _clamp(row["Fin"])
-            descanso = int(row["Descanso (min)"])
-            horas = float(row["Horas"])
-            extras_txt = row["Extras"]
-            notas = row["Notas"]
-            fila_id = int(row["ID"])
+    cols_show = ["Fecha","Día","Inicio","Fin","Descanso (min)","Horas","Extras","Notas"]
+    col_cfg = {
+        "Fecha": st.column_config.TextColumn(disabled=True),
+        "Día": st.column_config.TextColumn(disabled=True),
+        "Inicio": st.column_config.SelectboxColumn(options=TIME_OPTIONS, help="Hora de inicio (HH:MM)", disabled=not permite_editar),
+        "Fin": st.column_config.SelectboxColumn(options=TIME_OPTIONS, help="Hora de fin (HH:MM)", disabled=not permite_editar),
+        "Descanso (min)": st.column_config.NumberColumn(disabled=True),
+        "Horas": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+        "Extras": st.column_config.TextColumn(disabled=True),
+        "Notas": st.column_config.TextColumn(disabled=True),
+    }
 
-            with st.container(border=True):
-                st.markdown(f"**{dia} {fecha}**")
-                c1, c2 = st.columns(2)
-                with c1:
-                    nuevo_ini = st.selectbox(
-                        "Inicio", TIME_OPTIONS, index=TIME_OPTIONS.index(inicio),
-                        key=f"ini_{fila_id}", disabled=not permite_editar
-                    )
-                with c2:
-                    nuevo_fin = st.selectbox(
-                        "Fin", TIME_OPTIONS, index=TIME_OPTIONS.index(fin),
-                        key=f"fin_{fila_id}", disabled=not permite_editar
-                    )
-                st.caption(f"Descanso: {descanso} min · Horas: {horas:.2f} · Extras: {extras_txt}")
-                if notas:
-                    st.caption(f"Notas: {notas}")
+    df_display = df_hist[cols_show].copy()
+    df_editado = st.data_editor(
+        df_display,
+        column_config=col_cfg,
+        use_container_width=True,
+        num_rows="fixed",
+        key=f"editor_hist_{yyyy_mm_objetivo}"
+    )
 
-                if permite_editar and (nuevo_ini != inicio or nuevo_fin != fin):
-                    t_ini = parse_hhmm(nuevo_ini); t_fin = parse_hhmm(nuevo_fin)
-                    if t_ini and t_fin:
-                        with Session(repo.engine) as s:
-                            fila = s.get(WorkShiftDB, fila_id)
-                            if fila:
-                                hw = calcular_horas_trabajadas(t_ini, t_fin, fila.break_minutes, base_date=fila.work_date)
-                                delta = delta_diario_horas(hw)
-                                fila.start_time = t_ini
-                                fila.end_time = t_fin
-                                fila.hours_worked = hw
-                                fila.overtime_hours = delta
-                                s.add(fila)
-                                s.commit()
-                                st.toast("Guardado.", icon="✅")
-                                st.rerun()
-                    else:
-                        st.warning("Hora inválida.")
-        st.caption("Vista móvil: tarjetas verticales, sin scroll lateral.")
-    else:
-        # ---- VISTA TABLA (escritorio) ----
-        def _clamp(hhmm: str) -> str:
-            if hhmm in TIME_OPTIONS:
-                return hhmm
-            try:
-                h, m = map(int, hhmm.split(":"))
-                if h < 6: return "06:00"
-                if h > 23 or (h == 23 and m > 55): return "00:00"
-                m = (m // 5) * 5
-                c = f"{h:02d}:{m:02d}"
-                return c if c in TIME_OPTIONS else "06:00"
-            except:
-                return "06:00"
-        df_hist["Inicio"] = df_hist["Inicio"].apply(_clamp)
-        df_hist["Fin"]    = df_hist["Fin"].apply(_clamp)
+    # Guardado automático solo si está permitido
+    if permite_editar:
+        base_json = df_display[["Inicio","Fin"]].to_json()
+        key_sig = f"last_saved_editor_signature_{yyyy_mm_objetivo}"
+        if key_sig not in st.session_state:
+            st.session_state[key_sig] = base_json
+        current_json = df_editado[["Inicio","Fin"]].to_json()
 
-        cols_show = ["Fecha","Día","Inicio","Fin","Descanso (min)","Horas","Extras","Notas"]
-        col_cfg = {
-            "Fecha": st.column_config.TextColumn(disabled=True),
-            "Día": st.column_config.TextColumn(disabled=True),
-            "Inicio": st.column_config.SelectboxColumn(options=TIME_OPTIONS, help="Hora de inicio (HH:MM)", disabled=not permite_editar),
-            "Fin": st.column_config.SelectboxColumn(options=TIME_OPTIONS, help="Hora de fin (HH:MM)", disabled=not permite_editar),
-            "Descanso (min)": st.column_config.NumberColumn(disabled=True),
-            "Horas": st.column_config.NumberColumn(disabled=True, format="%.2f"),
-            "Extras": st.column_config.TextColumn(disabled=True),
-            "Notas": st.column_config.TextColumn(disabled=True),
-        }
-
-        df_display = df_hist[cols_show].copy()
-        df_editado = st.data_editor(
-            df_display,
-            column_config=col_cfg,
-            use_container_width=True,
-            num_rows="fixed",
-            key=f"editor_hist_{yyyy_mm_objetivo}"
-        )
-
-        if permite_editar:
-            base_json = df_display[["Inicio","Fin"]].to_json()
-            key_sig = f"last_saved_editor_signature_{yyyy_mm_objetivo}"
-            if key_sig not in st.session_state:
-                st.session_state[key_sig] = base_json
-            current_json = df_editado[["Inicio","Fin"]].to_json()
-
-            if current_json != st.session_state[key_sig]:
-                cambios = 0
-                with Session(repo.engine) as s:
-                    for idx, row in df_editado.iterrows():
-                        orig = df_display.loc[idx]
-                        if (row["Inicio"] != orig["Inicio"]) or (row["Fin"] != orig["Fin"]):
-                            t_ini = parse_hhmm(row["Inicio"]); t_fin = parse_hhmm(row["Fin"])
-                            if not t_ini or not t_fin:
-                                st.warning(f"Fila {idx+1}: hora inválida.")
-                                continue
-                            fila_id = int(df_hist.loc[idx, "ID"])
-                            fila = s.get(WorkShiftDB, fila_id)
-                            if not fila:
-                                continue
-                            hw = calcular_horas_trabajadas(t_ini, t_fin, fila.break_minutes, base_date=datetime.fromisoformat(fila.work_date.isoformat()).date())
-                            delta = delta_diario_horas(hw)
-                            fila.start_time = t_ini
-                            fila.end_time = t_fin
-                            fila.hours_worked = hw
-                            fila.overtime_hours = delta
-                            s.add(fila); cambios += 1
-                    if cambios:
-                        s.commit()
-                st.session_state[key_sig] = current_json
+        if current_json != st.session_state[key_sig]:
+            cambios = 0
+            with Session(repo.engine) as s:
+                for idx, row in df_editado.iterrows():
+                    orig = df_display.loc[idx]
+                    if (row["Inicio"] != orig["Inicio"]) or (row["Fin"] != orig["Fin"]):
+                        t_ini = parse_hhmm(row["Inicio"]); t_fin = parse_hhmm(row["Fin"])
+                        if not t_ini or not t_fin:
+                            st.warning(f"Fila {idx+1}: hora inválida.")
+                            continue
+                        fila_id = int(df_hist.loc[idx, "ID"])
+                        fila = s.get(WorkShiftDB, fila_id)
+                        if not fila:
+                            continue
+                        # Recalcula usando la fecha real de ese día
+                        hw = calcular_horas_trabajadas(t_ini, t_fin, fila.break_minutes, base_date=datetime.fromisoformat(fila.work_date.isoformat()).date())
+                        delta = delta_diario_horas(hw)
+                        fila.start_time = t_ini
+                        fila.end_time = t_fin
+                        fila.hours_worked = hw
+                        fila.overtime_hours = delta
+                        s.add(fila); cambios += 1
                 if cambios:
-                    st.toast("Guardado automático aplicado.", icon="✅")
-                    st.rerun()
+                    s.commit()
+            st.session_state[key_sig] = current_json
+            if cambios:
+                st.toast("Guardado automático aplicado.", icon="✅")
+                st.rerun()
 
 # =========================
 # 📅 Resumen semanal (del mes mostrado)
 # =========================
 st.subheader("📅 Resumen semanal")
 if not df_hist.empty:
-    with st.spinner("Calculando resumen semanal…"):
-        d1, d2 = rango_mes(yyyy_mm_objetivo)
-        with Session(repo.engine) as s:
-            filas = s.exec(select(WorkShiftDB).where(WorkShiftDB.work_date >= d1, WorkShiftDB.work_date <= d2)).all()
-        from collections import defaultdict
-        tot_sem_h = defaultdict(float)
-        extras_semana_min = defaultdict(int)
-        extras_sobre30_min = defaultdict(int)
-        for f in filas:
-            if f.hours_worked is None:
-                hw = calcular_horas_trabajadas(f.start_time, f.end_time, f.break_minutes, base_date=f.work_date)
-            else:
-                hw = float(f.hours_worked)
-            yy, ww, _ = f.work_date.isocalendar()
-            key = (yy, ww)
-            tot_sem_h[key] += float(hw)
-            delta_dia_min = int(round((float(hw) - UMBRAL_DIARIO_H) * 60))
-            extras_semana_min[key] += delta_dia_min
-        for (yy, ww), total_h in tot_sem_h.items():
-            excedente30 = int(round(max(0.0, total_h - UMBRAL_SEMANAL_H) * 60))
-            if excedente30 > 0:
-                extras_sobre30_min[(yy, ww)] = excedente30
-        for (yy, ww) in sorted(tot_sem_h.keys(), reverse=True):
-            lunes = datetime.fromisocalendar(yy, ww, 1).date()
-            domingo = lunes + timedelta(days=6)
-            total_h = round(tot_sem_h[(yy, ww)], 2)
-            total_h_str = formatea_horas_float(total_h)
-            extra_sem_str = formatea_minutos_signed(extras_semana_min.get((yy, ww), 0))
-            extra30 = extras_sobre30_min.get((yy, ww), 0)
-            with st.expander(f"{lunes.strftime('%d/%m/%Y')} – {domingo.strftime('%d/%m/%Y')} · {total_h_str}", expanded=False):
-                st.markdown(f"- **Horas totales**: {total_h_str}")
-                st.markdown(f"- **Extras acumuladas de la semana**: {extra_sem_str}")
-                if extra30 > 0:
-                    st.markdown(f"- **Extras sobre 30 h**: {formatea_minutos_signed(extra30)}")
+    d1, d2 = rango_mes(yyyy_mm_objetivo)
+    with Session(repo.engine) as s:
+        filas = s.exec(select(WorkShiftDB).where(WorkShiftDB.work_date >= d1, WorkShiftDB.work_date <= d2)).all()
+    from collections import defaultdict
+    tot_sem_h = defaultdict(float)
+    extras_semana_min = defaultdict(int)
+    extras_sobre30_min = defaultdict(int)
+    for f in filas:
+        if f.hours_worked is None:
+            hw = calcular_horas_trabajadas(f.start_time, f.end_time, f.break_minutes, base_date=f.work_date)
+        else:
+            hw = float(f.hours_worked)
+        yy, ww, _ = f.work_date.isocalendar()
+        key = (yy, ww)
+        tot_sem_h[key] += float(hw)
+        delta_dia_min = int(round((float(hw) - UMBRAL_DIARIO_H) * 60))
+        extras_semana_min[key] += delta_dia_min
+    for (yy, ww), total_h in tot_sem_h.items():
+        excedente30 = int(round(max(0.0, total_h - UMBRAL_SEMANAL_H) * 60))
+        if excedente30 > 0:
+            extras_sobre30_min[(yy, ww)] = excedente30
+    for (yy, ww) in sorted(tot_sem_h.keys(), reverse=True):
+        lunes = datetime.fromisocalendar(yy, ww, 1).date()
+        domingo = lunes + timedelta(days=6)
+        total_h = round(tot_sem_h[(yy, ww)], 2)
+        total_h_str = formatea_horas_float(total_h)
+        extra_sem_str = formatea_minutos_signed(extras_semana_min.get((yy, ww), 0))
+        extra30 = extras_sobre30_min.get((yy, ww), 0)
+        with st.expander(f"{lunes.strftime('%d/%m/%Y')} – {domingo.strftime('%d/%m/%Y')} · {total_h_str}", expanded=False):
+            st.markdown(f"- **Horas totales**: {total_h_str}")
+            st.markdown(f"- **Extras acumuladas de la semana**: {extra_sem_str}")
+            if extra30 > 0:
+                st.markdown(f"- **Extras sobre 30 h**: {formatea_minutos_signed(extra30)}")
 
 # =========================
 # ⬇️ PDF — mes mostrado (por defecto: actual)
 # =========================
 st.subheader("⬇️ PDF del mes mostrado")
-with st.spinner("Generando PDF…"):
-    df_tbl, horas_mes, extras_min = construir_df_para_pdf_mes(yyyy_mm_objetivo)
-    titulo_pdf = f"{TITULO_APP} — {mes_en_letras_esp(yyyy_mm_objetivo)}"
-    bruto_mes = horas_mes * HOURLY_GROSS_EUR
-    neto_mes = bruto_mes * (1 - IRPF_EST_PERCENT)
-    l1 = f"Horas extras acumuladas del mes: {formatea_minutos_signed(extras_min)}"
-    l2 = f"Total bruto del mes: {eur(bruto_mes)} € · Total neto estimado: {eur(neto_mes)} €"
-    pdf_bytes = dataframe_a_pdf(df_tbl, titulo=titulo_pdf, resumen_linea1=l1, resumen_linea2=l2)
-
+df_tbl, horas_mes, extras_min = construir_df_para_pdf_mes(yyyy_mm_objetivo)
+titulo_pdf = f"{TITULO_APP} — {mes_en_letras_esp(yyyy_mm_objetivo)}"
+bruto_mes = horas_mes * HOURLY_GROSS_EUR
+neto_mes = bruto_mes * (1 - IRPF_EST_PERCENT)
+l1 = f"Horas extras acumuladas del mes: {formatea_minutos_signed(extras_min)}"
+l2 = f"Total bruto del mes: {eur(bruto_mes)} € · Total neto estimado: {eur(neto_mes)} €"
+pdf_bytes = dataframe_a_pdf(df_tbl, titulo=titulo_pdf, resumen_linea1=l1, resumen_linea2=l2)
 st.download_button(
     "Descargar PDF del mes mostrado",
     data=pdf_bytes,
