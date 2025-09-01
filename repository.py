@@ -10,9 +10,7 @@ from sqlmodel import SQLModel, Field, Session, create_engine, select
 
 from domain import WorkShift
 
-
 class WorkShiftDB(SQLModel, table=True):
-    # Nota: el nombre de la tabla por defecto será "workshiftdb"
     id: int | None = Field(default=None, primary_key=True)
     work_date: date = Field(index=True)
     start_time: time
@@ -22,48 +20,46 @@ class WorkShiftDB(SQLModel, table=True):
     overtime_hours: float
     notes: str | None = None
 
-
 def build_engine(db_url: str, echo: bool = False):
-    """
-    Crea el engine para SQLite o Postgres (Supabase).
-    - SQLite: check_same_thread=False para uso con Streamlit.
-    - Postgres/Supabase: NullPool (el pooling lo hace PgBouncer o el servidor) + pool_pre_ping.
-      Asegúrate de que la URL lleve sslmode=require y, si usas Transaction Pooler,
-      desactiva prepared statements con statement_cache_size=0 (vía options en la URL).
-    """
     is_sqlite = db_url.startswith("sqlite")
-    kwargs = {"echo": echo, "pool_pre_ping": True, "future": True}
-
+    kwargs = {
+        "echo": echo,
+        "pool_pre_ping": True,
+        "future": True,
+        "connect_args": {},
+    }
     if is_sqlite:
         kwargs["connect_args"] = {"check_same_thread": False}
     else:
-        # Postgres (incluye Supabase): deja el pooling al pooler/servidor
+        # Deja el pooling al pooler (PgBouncer)
         kwargs["poolclass"] = NullPool
-
+        # timeouts para fallar rápido si la red no deja
+        kwargs["connect_args"] = {"connect_timeout": 10}
     return create_engine(db_url, **kwargs)
 
-
 class WorkShiftRepository:
-    """CRUD para turnos de trabajo. Compatible con SQLite y Postgres."""
+    """CRUD para turnos. Intenta Postgres y si falla, cae a SQLite."""
     def __init__(self, url: str = "sqlite:///workhours.db", echo: bool = False):
+        self.primary_url = url
         self.engine = build_engine(url, echo=echo)
-        is_sqlite = url.startswith("sqlite")
 
-        if is_sqlite:
-            # En SQLite siempre podemos crear el esquema local
-            SQLModel.metadata.create_all(self.engine)
-        else:
-            # En Postgres: intenta conectar y crear esquema, pero no derribes la app si falla
+        # 1) Intento de conexión si NO es sqlite
+        if not url.startswith("sqlite"):
             try:
                 with self.engine.connect() as conn:
                     conn.execute(text("select 1"))
-                SQLModel.metadata.create_all(self.engine)
             except Exception as e:
-                # No interrumpas el arranque; la UI mostrará el error en la barra lateral
-                print("⚠️  Aviso: no se pudo conectar/crear tablas en la BD remota:", repr(e))
+                # 2) Fallback a SQLite en ./data/workhours.db
+                from pathlib import Path
+                data_dir = Path("./data")
+                data_dir.mkdir(parents=True, exist_ok=True)
+                fallback_url = f"sqlite:///{(data_dir / 'workhours.db').as_posix()}"
+                self.engine = build_engine(fallback_url, echo=False)
+
+        # Crea tablas si no existen (en el engine activo)
+        SQLModel.metadata.create_all(self.engine)
 
     def add(self, s: WorkShift) -> None:
-        """Inserta un registro de trabajo."""
         with Session(self.engine) as session:
             row = WorkShiftDB(
                 work_date=s.work_date,
@@ -78,7 +74,6 @@ class WorkShiftRepository:
             session.commit()
 
     def list_all(self) -> List[WorkShift]:
-        """Devuelve todos los registros (últimos primero)."""
         with Session(self.engine) as session:
             rows = session.exec(
                 select(WorkShiftDB).order_by(WorkShiftDB.work_date.desc(), WorkShiftDB.id.desc())
