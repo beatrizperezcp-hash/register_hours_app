@@ -59,8 +59,12 @@ DATA_DIR = _pick_data_dir()
 # Usa Postgres si hay DATABASE_URL; si no, SQLite en DATA_DIR
 DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{(DATA_DIR / 'workhours.db').as_posix()}")
 
-# Repo (usa Postgres si DATABASE_URL existe; si no, SQLite local)
-repo = WorkShiftRepository(DB_URL, echo=False)
+# ==== Repositorio cacheado (evita abrir muchas conexiones en free tier) ====
+@st.cache_resource
+def get_repo(url: str):
+    return WorkShiftRepository(url, echo=False)
+
+repo = get_repo(DB_URL)
 
 # Carpeta de PDFs (si falla, cae a ./reportes_mensuales)
 CARPETA_REPORTES = DATA_DIR / "reportes_mensuales"
@@ -626,4 +630,3 @@ if archivados_filtrados:
             )
 else:
     st.caption("No hay PDFs archivados todavía.")
-
