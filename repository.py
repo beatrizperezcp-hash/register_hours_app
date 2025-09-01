@@ -27,9 +27,9 @@ def build_engine(db_url: str, echo: bool = False):
     """
     Crea el engine para SQLite o Postgres (Supabase).
     - SQLite: check_same_thread=False para uso con Streamlit.
-    - Postgres/Supabase: usamos NullPool (pooling lo hace PgBouncer) y pool_pre_ping.
-      Asegúrate de que la DB_URL incluya sslmode=require y, si usas Transaction Pooler,
-      desactivar prepared statements con statement_cache_size=0 (vía options en la URL).
+    - Postgres/Supabase: NullPool (el pooling lo hace PgBouncer o el servidor) + pool_pre_ping.
+      Asegúrate de que la URL lleve sslmode=require y, si usas Transaction Pooler,
+      desactiva prepared statements con statement_cache_size=0 (vía options en la URL).
     """
     is_sqlite = db_url.startswith("sqlite")
     kwargs = {"echo": echo, "pool_pre_ping": True, "future": True}
@@ -37,7 +37,7 @@ def build_engine(db_url: str, echo: bool = False):
     if is_sqlite:
         kwargs["connect_args"] = {"check_same_thread": False}
     else:
-        # Postgres (incluye Supabase): deja el pooling al pooler (PgBouncer)
+        # Postgres (incluye Supabase): deja el pooling al pooler/servidor
         kwargs["poolclass"] = NullPool
 
     return create_engine(db_url, **kwargs)
@@ -47,14 +47,20 @@ class WorkShiftRepository:
     """CRUD para turnos de trabajo. Compatible con SQLite y Postgres."""
     def __init__(self, url: str = "sqlite:///workhours.db", echo: bool = False):
         self.engine = build_engine(url, echo=echo)
+        is_sqlite = url.startswith("sqlite")
 
-        # Smoke test de conexión si no es SQLite (falla rápido si hay problema de host/puerto/SSL)
-        if not url.startswith("sqlite"):
-            with self.engine.connect() as conn:
-                conn.execute(text("select 1"))
-
-        # Crea tablas si no existen
-        SQLModel.metadata.create_all(self.engine)
+        if is_sqlite:
+            # En SQLite siempre podemos crear el esquema local
+            SQLModel.metadata.create_all(self.engine)
+        else:
+            # En Postgres: intenta conectar y crear esquema, pero no derribes la app si falla
+            try:
+                with self.engine.connect() as conn:
+                    conn.execute(text("select 1"))
+                SQLModel.metadata.create_all(self.engine)
+            except Exception as e:
+                # No interrumpas el arranque; la UI mostrará el error en la barra lateral
+                print("⚠️  Aviso: no se pudo conectar/crear tablas en la BD remota:", repr(e))
 
     def add(self, s: WorkShift) -> None:
         """Inserta un registro de trabajo."""
