@@ -217,18 +217,7 @@ st.caption("Mes actual: añade/edita tus horas. Meses anteriores: descárgalos e
 
 # === Indicador de conexión a BD (barra lateral) ===
 
-"""
-try:
-    with Session(repo.engine) as s:
-        s.exec(text("SELECT 1"))
-    backend = repo.engine.url.get_backend_name()  # 'postgresql' o 'sqlite'
-    st.sidebar.success(f"BD OK · {('Postgres (Supabase)' if backend.startswith('postgres') else 'SQLite (local)')}")
-    st.sidebar.caption(repo.engine.url.render_as_string(hide_password=True))
-except Exception as e:
-    st.sidebar.error("❌ Error de conexión a la BD")
-    st.sidebar.caption("Revisa DATABASE_URL / 'psycopg2-binary' / pooler IPv4.")
-    st.sidebar.exception(e)
-"""
+
 # =========================
 # Helpers de estado (sin conflictos)
 # =========================
