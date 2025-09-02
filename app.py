@@ -54,13 +54,18 @@ def _pick_data_dir() -> Path:
             continue
     return Path.cwd()  # último recurso
 
+# app.py (fragmento)
 DATA_DIR = _pick_data_dir()
+DEFAULT_SQLITE = f"sqlite:///{(DATA_DIR / 'workhours.db').as_posix()}"
 
-# Usa Postgres si hay DATABASE_URL; si no, SQLite en DATA_DIR
-DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{(DATA_DIR / 'workhours.db').as_posix()}")
+DB_URL = os.getenv("DATABASE_URL", DEFAULT_SQLITE)
 
-# --- ⚡ NUEVO: romper caché y cachear repo con buster (para Render) ---
-st.cache_resource.clear()
+# Si estás en Render/Spaces/Streamlit Cloud deberías tener siempre DATABASE_URL.
+# Opcional: si detectas plataforma, exige Postgres.
+if "RENDER" in os.environ or "SPACE_ID" in os.environ or os.getenv("STREAMLIT_RUNTIME") == "cloud":
+    if DB_URL.startswith("sqlite"):
+        st.error("Falta DATABASE_URL (Postgres). Configura la variable de entorno en el hosting.")
+
 
 @st.cache_resource
 def get_repo(url: str, buster: str):
