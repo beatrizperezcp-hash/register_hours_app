@@ -216,6 +216,8 @@ st.markdown(f'<div class="app-header">⏱️ {TITULO_APP}</div>', unsafe_allow_h
 st.caption("Mes actual: añade/edita tus horas. Meses anteriores: descárgalos en PDF. L–V por defecto; fines de semana manual.")
 
 # === Indicador de conexión a BD (barra lateral) ===
+
+"""
 try:
     with Session(repo.engine) as s:
         s.exec(text("SELECT 1"))
@@ -226,7 +228,7 @@ except Exception as e:
     st.sidebar.error("❌ Error de conexión a la BD")
     st.sidebar.caption("Revisa DATABASE_URL / 'psycopg2-binary' / pooler IPv4.")
     st.sidebar.exception(e)
-
+"""
 # =========================
 # Helpers de estado (sin conflictos)
 # =========================
