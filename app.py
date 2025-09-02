@@ -492,7 +492,7 @@ else:
     df_hist["Inicio"] = df_hist["Inicio"].apply(_clamp)
     df_hist["Fin"]    = df_hist["Fin"].apply(_clamp)
 
-    cols_show = ["Fecha","Día","Inicio","Fin","Descanso (min)","Horas","Extras","Notas"]
+    cols_show = ["Fecha","Día","Inicio","Fin","Descanso (min)","Horas","Extras"]
     col_cfg = {
         "Fecha": st.column_config.TextColumn(disabled=True),
         "Día": st.column_config.TextColumn(disabled=True),
