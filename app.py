@@ -14,25 +14,29 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 from sqlmodel import Session, select
+from sqlalchemy import text
 
 from domain import WorkShift
 from repository import WorkShiftRepository, WorkShiftDB
-
-# Limpia caché (útil tras despliegues)
-st.cache_data.clear()
-st.cache_resource.clear()
 
 # =========================
 # Zona horaria (Madrid)
 # =========================
 TZ = ZoneInfo("Europe/Madrid")
+
 def hoy_local() -> date:
     return datetime.now(TZ).date()
 
 # =========================
-# Persistencia por entorno (con fallback local SOLO para desarrollo)
+# Persistencia por entorno (con fallback seguro)
 # =========================
 def _pick_data_dir() -> Path:
+    """
+    Elige carpeta escribible para DB/PDFs:
+    1) Si DATA_DIR está definido y es escribible, se usa.
+    2) Si /data es escribible (disco montado), se usa.
+    3) Si no, ./data en el working dir.
+    """
     candidates = []
     env = os.getenv("DATA_DIR")
     if env:
@@ -48,21 +52,26 @@ def _pick_data_dir() -> Path:
             return p
         except Exception:
             continue
-    return Path.cwd()
+    return Path.cwd()  # último recurso
 
+# app.py (fragmento)
 DATA_DIR = _pick_data_dir()
 DEFAULT_SQLITE = f"sqlite:///{(DATA_DIR / 'workhours.db').as_posix()}"
+
 DB_URL = os.getenv("DATABASE_URL", DEFAULT_SQLITE)
 
-# Exigir Postgres en hosting (Render / HF Spaces / Streamlit Cloud)
-if ("RENDER" in os.environ or "SPACE_ID" in os.environ or os.getenv("STREAMLIT_RUNTIME") == "cloud"):
+# Si estás en Render/Spaces/Streamlit Cloud deberías tener siempre DATABASE_URL.
+# Opcional: si detectas plataforma, exige Postgres.
+if "RENDER" in os.environ or "SPACE_ID" in os.environ or os.getenv("STREAMLIT_RUNTIME") == "cloud":
     if DB_URL.startswith("sqlite"):
         st.error("Falta DATABASE_URL (Postgres). Configura la variable de entorno en el hosting.")
+
 
 @st.cache_resource
 def get_repo(url: str, buster: str):
     return WorkShiftRepository(url, echo=False)
 
+print("DATABASE_URL =", DB_URL)  # verás esto en los logs de Render
 repo = get_repo(DB_URL, buster=DB_URL)
 
 # Carpeta de PDFs (si falla, cae a ./reportes_mensuales)
@@ -84,8 +93,8 @@ GRACIA_DIAS = 4                    # puedes editar el mes anterior hasta el día
 AVISO_ULTIMOS_DIAS = 2             # aviso cuando queden <= 2 días de mes
 
 # Salario (solo para PDF)
-HOURLY_GROSS_EUR = 13.30
-IRPF_EST_PERCENT = 0.15
+HOURLY_GROSS_EUR = 13.30           # €/h brutos
+IRPF_EST_PERCENT = 0.15            # IRPF aproximado
 
 # =========================
 # Utilidades de formato/tiempo
@@ -128,6 +137,7 @@ def parse_hhmm(s: str) -> time | None:
         return None
 
 def opciones_horas(step_min: int = 5, start: str = "06:00", end: str = "00:00") -> list[str]:
+    """Opciones HH:MM cada step_min, de start a 23:55 + 00:00 final."""
     sh, sm = map(int, start.split(":"))
     opts = []
     for h in range(sh, 24):
@@ -181,6 +191,7 @@ def delta_diario_horas(hours_worked: float) -> float:
 # =========================
 st.set_page_config(page_title=TITULO_APP, page_icon="⏱️", layout="centered")
 
+# CSS: título más pequeño y en UNA línea en móvil (≤ 480px)
 st.markdown("""
 <style>
 .app-header { 
@@ -204,11 +215,22 @@ st.markdown("""
 st.markdown(f'<div class="app-header">⏱️ {TITULO_APP}</div>', unsafe_allow_html=True)
 st.caption("Mes actual: añade/edita tus horas. Meses anteriores: descárgalos en PDF. L–V por defecto; fines de semana manual.")
 
-# (Sidebar limpia)
-st.sidebar.empty()
+# === Indicador de conexión a BD (barra lateral) ===
 
+"""
+try:
+    with Session(repo.engine) as s:
+        s.exec(text("SELECT 1"))
+    backend = repo.engine.url.get_backend_name()  # 'postgresql' o 'sqlite'
+    st.sidebar.success(f"BD OK · {('Postgres (Supabase)' if backend.startswith('postgres') else 'SQLite (local)')}")
+    st.sidebar.caption(repo.engine.url.render_as_string(hide_password=True))
+except Exception as e:
+    st.sidebar.error("❌ Error de conexión a la BD")
+    st.sidebar.caption("Revisa DATABASE_URL / 'psycopg2-binary' / pooler IPv4.")
+    st.sidebar.exception(e)
+"""
 # =========================
-# Helpers de estado
+# Helpers de estado (sin conflictos)
 # =========================
 def _init_add_form_defaults():
     if st.session_state.get("_reset_add_form", False):
@@ -246,6 +268,7 @@ def cargar_hist_df_de_mes(yyyy_mm: str) -> pd.DataFrame:
             .where(WorkShiftDB.work_date >= d1, WorkShiftDB.work_date <= d2)
             .order_by(WorkShiftDB.work_date.desc(), WorkShiftDB.id.desc())
         ).all()
+    # Quedarse con el último registro de cada día
     vistos, dedup = set(), []
     for f in filas:
         if f.work_date in vistos:
@@ -272,7 +295,7 @@ def cargar_hist_df_de_mes(yyyy_mm: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # =========================
-# PDF (bordes + caja resumen)
+# PDF (bordes + caja resumen estrecha centrada)
 # =========================
 def dataframe_a_pdf(df: pd.DataFrame, titulo: str, resumen_linea1: str | None = None, resumen_linea2: str | None = None) -> bytes:
     try:
@@ -332,7 +355,6 @@ def dataframe_a_pdf(df: pd.DataFrame, titulo: str, resumen_linea1: str | None = 
             ("INNERPADDING", (0, 0), (-1, -1), 8),
         ]))
         story.append(resumen_box)
-
     def draw_page_border(canvas, doc_obj):
         canvas.saveState()
         w, h = doc_obj.pagesize
@@ -341,7 +363,6 @@ def dataframe_a_pdf(df: pd.DataFrame, titulo: str, resumen_linea1: str | None = 
         margin = 12
         canvas.rect(margin, margin, w - 2*margin, h - 2*margin)
         canvas.restoreState()
-
     doc.build(story, onFirstPage=draw_page_border, onLaterPages=draw_page_border)
     return buf.getvalue()
 
@@ -372,16 +393,18 @@ hoy = hoy_local()
 mes_actual = clave_mes(hoy)
 prev_day = (date(hoy.year, hoy.month, 1) - timedelta(days=1))
 mes_anterior = clave_mes(prev_day)
-last_day_curr = (date(hoy.year+1, 1, 1) - timedelta(days=1)) if hoy.month == 12 else (date(hoy, hoy.month+1, 1) - timedelta(days=1))
+last_day_curr = (date(hoy.year+1, 1, 1) - timedelta(days=1)) if hoy.month == 12 else (date(hoy.year, hoy.month+1, 1) - timedelta(days=1))
 dias_restantes = (last_day_curr - hoy).days
 
+# Avisos
 if dias_restantes <= AVISO_ULTIMOS_DIAS and dias_restantes >= 0:
     st.info(f"Este mes se **archivará automáticamente el día {GRACIA_DIAS+1} del próximo mes**. Aún puedes editar hasta final de mes.", icon="ℹ️")
 if 1 <= hoy.day <= GRACIA_DIAS:
     st.warning(f"⏳ Puedes **editar el mes anterior** ({mes_en_letras_esp(mes_anterior)}) hasta el día {GRACIA_DIAS}.", icon="⏰")
 
+# Archivado automático el día 5
 def auto_archivar_mes_anterior():
-    if hoy.day >= GRACIA_DIAS + 1:  # día 5
+    if hoy.day >= GRACIA_DIAS + 1:  # 5 en nuestro caso
         df_prev = cargar_hist_df_de_mes(mes_anterior)
         if df_prev.empty:
             return
@@ -391,50 +414,55 @@ def auto_archivar_mes_anterior():
             with open(destino, "wb") as fh:
                 fh.write(pdf_bytes)
         except Exception:
-            st.warning("No se pudo guardar el PDF en disco (sin permisos). Puedes descargarlo desde “PDF del mes mostrado”.")
+            st.warning(
+                "No se pudo guardar el PDF en disco (sin permisos). "
+                "Puedes descargarlo desde “PDF del mes mostrado”."
+            )
 
 auto_archivar_mes_anterior()
 
 # =========================
-# ➕ Añadir registro (fecha elegible)
+# ➕ Añadir (hoy)
 # =========================
-st.subheader("➕ Añadir registro")
-st.caption("Añade un registro para la fecha que elijas (por defecto: hoy).")
-
+st.subheader("➕ Añadir (hoy)")
+st.caption("Añade SOLO el día de hoy. Para días pasados usa la edición del histórico.")
 def _init_add_form_defaults_wrapper():
     _flash_success_if_any()
     _init_add_form_defaults()
 _init_add_form_defaults_wrapper()
 
-fecha_nv = st.date_input("Fecha", value=hoy, max_value=hoy)
-selectbox_state("Inicio", "inicio_nuevo_str", "08:00", TIME_OPTIONS)
-selectbox_state("Fin",    "fin_nuevo_str",    "14:30", TIME_OPTIONS)
-st.number_input("Descanso (min)", min_value=0, step=5, key="descanso_nuevo", value=DESCANSO_DEFECTO_MIN)
-st.text_input("Notas (opcional)", placeholder="", key="notas_nuevas")
+if existe_registro(hoy):
+    st.info("Hoy ya tiene un registro. Edita abajo, en **Histórico**.")
+else:
+    st.text_input("Fecha", value=hoy.strftime("%d/%m/%Y"), disabled=True)
+    selectbox_state("Inicio", "inicio_nuevo_str", "08:00", TIME_OPTIONS)
+    selectbox_state("Fin",    "fin_nuevo_str",    "14:30", TIME_OPTIONS)
+    st.number_input("Descanso (min)", min_value=0, step=5, key="descanso_nuevo", value=DESCANSO_DEFECTO_MIN)
+    st.text_input("Notas (opcional)", placeholder="", key="notas_nuevas")
 
-if st.button("Guardar registro", use_container_width=True):
-    inicio_nuevo = parse_hhmm(st.session_state.get("inicio_nuevo_str", "08:00"))
-    fin_nuevo    = parse_hhmm(st.session_state.get("fin_nuevo_str", "14:30"))
-    descanso_nv  = int(st.session_state.get("descanso_nuevo", DESCANSO_DEFECTO_MIN))
-    notas_nv     = st.session_state.get("notas_nuevas", "")
+    if st.button("Guardar hoy", use_container_width=True):
+        inicio_nuevo = parse_hhmm(st.session_state.get("inicio_nuevo_str", "08:00"))
+        fin_nuevo    = parse_hhmm(st.session_state.get("fin_nuevo_str", "14:30"))
+        descanso_nv  = int(st.session_state.get("descanso_nuevo", DESCANSO_DEFECTO_MIN))
+        notas_nv     = st.session_state.get("notas_nuevas", "")
 
-    if not inicio_nuevo or not fin_nuevo:
-        st.warning("Selecciona horas válidas.")
-    elif existe_registro(fecha_nv):
-        st.warning("Ese día ya está registrado.")
-    else:
-        hw = calcular_horas_trabajadas(inicio_nuevo, fin_nuevo, descanso_nv, base_date=fecha_nv)
-        delta = delta_diario_horas(hw)
-        repo.add(WorkShift(
-            work_date=fecha_nv,
-            start_time=inicio_nuevo, end_time=fin_nuevo, break_minutes=descanso_nv,
-            hours_worked=hw, overtime_hours=delta, notes=(notas_nv.strip() or None)
-        ))
-        st.session_state["_reset_add_form"] = True
-        st.session_state["_flash_success"] = (
-            f"Guardado {fecha_nv.strftime('%d/%m/%Y')}: {formatea_horas_float(hw)} · Extra: {formatea_minutos_signed(int(round(delta*60)))}"
-        )
-        st.rerun()
+        if not inicio_nuevo or not fin_nuevo:
+            st.warning("Selecciona horas válidas.")
+        elif existe_registro(hoy):
+            st.warning("Ese día ya está registrado.")
+        else:
+            hw = calcular_horas_trabajadas(inicio_nuevo, fin_nuevo, descanso_nv, base_date=hoy)
+            delta = delta_diario_horas(hw)
+            repo.add(WorkShift(
+                work_date=hoy,
+                start_time=inicio_nuevo, end_time=fin_nuevo, break_minutes=descanso_nv,
+                hours_worked=hw, overtime_hours=delta, notes=(notas_nv.strip() or None)
+            ))
+            st.session_state["_reset_add_form"] = True
+            st.session_state["_flash_success"] = (
+                f"Guardado: {formatea_horas_float(hw)} · Extra: {formatea_minutos_signed(int(round(delta*60)))}"
+            )
+            st.rerun()
 
 # =========================
 # 🗓️ Histórico — mes actual o mes anterior (hasta día 4)
@@ -442,6 +470,7 @@ if st.button("Guardar registro", use_container_width=True):
 st.subheader("🗓️ Histórico")
 puede_editar_anterior = (1 <= hoy.day <= GRACIA_DIAS)
 opciones_hist = ["Mes actual"]
+# Mostrar siempre el mes anterior durante los días de gracia, aunque la BD actual no tenga datos
 if puede_editar_anterior:
     opciones_hist.append("Mes anterior (hasta día 4)")
 seleccion = st.radio("Mes a editar", opciones_hist, horizontal=True, label_visibility="collapsed")
@@ -454,6 +483,7 @@ df_hist = cargar_hist_df_de_mes(yyyy_mm_objetivo)
 if df_hist.empty:
     st.info("Sin registros en este mes.")
 else:
+    # Asegurar que Inicio/Fin están dentro del rango permitido
     def _clamp(hhmm: str) -> str:
         if hhmm in TIME_OPTIONS:
             return hhmm
@@ -466,7 +496,6 @@ else:
             return c if c in TIME_OPTIONS else "06:00"
         except:
             return "06:00"
-
     df_hist["Inicio"] = df_hist["Inicio"].apply(_clamp)
     df_hist["Fin"]    = df_hist["Fin"].apply(_clamp)
 
@@ -491,6 +520,7 @@ else:
         key=f"editor_hist_{yyyy_mm_objetivo}"
     )
 
+    # Guardado automático solo si está permitido
     if permite_editar:
         base_json = df_display[["Inicio","Fin"]].to_json()
         key_sig = f"last_saved_editor_signature_{yyyy_mm_objetivo}"
@@ -512,7 +542,8 @@ else:
                         fila = s.get(WorkShiftDB, fila_id)
                         if not fila:
                             continue
-                        hw = calcular_horas_trabajadas(t_ini, t_fin, fila.break_minutes, base_date=fila.work_date)
+                        # Recalcula usando la fecha real de ese día
+                        hw = calcular_horas_trabajadas(t_ini, t_fin, fila.break_minutes, base_date=datetime.fromisoformat(fila.work_date.isoformat()).date())
                         delta = delta_diario_horas(hw)
                         fila.start_time = t_ini
                         fila.end_time = t_fin
@@ -539,7 +570,10 @@ if not df_hist.empty:
     extras_semana_min = defaultdict(int)
     extras_sobre30_min = defaultdict(int)
     for f in filas:
-        hw = float(f.hours_worked) if f.hours_worked is not None else calcular_horas_trabajadas(f.start_time, f.end_time, f.break_minutes, base_date=f.work_date)
+        if f.hours_worked is None:
+            hw = calcular_horas_trabajadas(f.start_time, f.end_time, f.break_minutes, base_date=f.work_date)
+        else:
+            hw = float(f.hours_worked)
         yy, ww, _ = f.work_date.isocalendar()
         key = (yy, ww)
         tot_sem_h[key] += float(hw)
@@ -583,7 +617,7 @@ st.download_button(
 )
 
 # =========================
-# 📁 Meses archivados (PDF)
+# 📁 Meses archivados (PDF) — solo meses pasados con datos en BD
 # =========================
 meses_con_datos = listar_meses_con_registros()
 archivos = sorted([p for p in CARPETA_REPORTES.glob("reporte_*.pdf")], reverse=True)
